@@ -1,0 +1,158 @@
+#!/usr/bin/perl -w
+
+# Load in modules
+use strict;
+use LWP::UserAgent;
+use HTTP::Request;
+use Config::Simple;
+use JSON;
+use Fcntl;
+use v5.10.1;
+
+my $num_args = $#ARGV + 1;
+my @params = @ARGV;
+my %CONFIG = &load_runtime_config();
+
+my $client_id = $CONFIG{'defaults.client_id'};
+my $api_key = $CONFIG{'defaults.api_key'};
+my $droplet_id = '';
+my $URL = "https://api.digitalocean.com/droplets/";
+
+if ($num_args <= 0) {
+	&display_usage();
+	exit;
+}
+
+my $ua = new LWP::UserAgent;
+$ua->agent("Perl API Client/1.0");
+
+given ($params[0]) {
+	when (['list', 'l']) {
+		my $url = "$URL?client_id=$client_id&api_key=$api_key";
+		my $return_value = &retrieve_results($url); 
+		my @droplets = @{ $return_value->{'droplets'} };
+		foreach my $d ( @droplets ) {
+			print $d->{'id'}.": ".$d->{'name'}."\n";
+		}
+	}
+	when ('status') {
+		given ($params[1]) {
+			when (! defined($params[1])) {
+				&display_usage();
+			}
+			when (/^\d+$/) {
+				my $url = "$URL$params[1]?client_id=$client_id&api_key=$api_key"; 
+				my $return_value = &retrieve_results($url); 
+				my $d = $return_value->{'droplet'};
+				print "$d->{'name'} is currently $d->{'status'} and can be found at $d->{'ip_address'}\n";
+			}
+			when (/^\w+$/) {
+				my $url = "$URL?client_id=$client_id&api_key=$api_key";
+				my $return_value = &retrieve_results($url); 
+				my $droplet = &resolve_droplet_name($params[1]); 
+				if ($droplet eq '')
+				{
+					print "Could not locate $params[1]\n";
+				}
+				else 
+				{
+					print "$droplet->{'name'} is currently $droplet->{'status'} and can be found at $droplet->{'ip_address'}\n";
+				}
+			}
+			default {
+				&display_usage();
+			}
+		}
+	}
+	when ('shutdown') {
+		my $url = "$URL$params[1]/power_off/?client_id=$client_id&api_key=$api_key";
+		my $return_value = &retrieve_results($url);
+		if (uc($return_value->{'status'}) eq "OK")
+		{
+			print "$params[1] has been shutdown\n";
+		}
+		else
+		{
+			print "ERROR: Could not successfully shutdown $params[1]\n";
+		}
+	}
+	when ('startup') {
+		my $url = "$URL$params[1]/power_on/?client_id=$client_id&api_key=$api_key";
+		my $return_value = &retrieve_results($url);
+		if (uc($return_value->{'status'}) eq "OK")
+		{
+			print "$params[1] has been turned on\n";
+		}
+		else
+		{
+			print "ERROR: Could not successfully startup $params[1]\n";
+		}
+	}
+	when ('config') {
+		given ($params[1]) {
+			when (['list', '-l']) {
+				foreach my $key (keys %CONFIG) {
+					print "$key=$CONFIG{$key}\n";
+				}
+			}
+		}
+	}
+	default {
+		&display_usage();
+	}
+}
+
+#Subroutines
+sub load_runtime_config {
+	my $config_path = "$ENV{'HOME'}/.thedoctor.ini";
+	my %values = ();
+	if (-e $config_path) 
+	{
+		Config::Simple->import_from($config_path, \%values);	
+	}
+	else
+	{
+		my $cfg = new Config::Simple(syntax=>'ini');
+
+		print "Some configuration is required. Please enter the following:\n";
+		print "Client ID: ";
+		chomp(my $client_id = <>);
+		print "API Key: ";
+		chomp(my $api_key = <>);
+
+		$cfg->param(-block=>"defaults", -values=>{"client_id"=>$client_id});
+		$cfg->param("defaults.api_key", $api_key);
+		$cfg->write($config_path);
+		%values = $cfg->vars();
+	}
+	return %values;
+}
+
+sub resolve_droplet_name {
+	my $url = "$URL?client_id=$client_id&api_key=$api_key";
+	my $return_value = &retrieve_results($url); 
+	my @droplets = @{ $return_value->{'droplets'} };
+	my $droplet = '';
+	foreach my $d ( @droplets ) {
+		if (uc($d->{'name'}) eq uc($_[0]))
+		{
+			$droplet = $d;
+		}
+	}
+	return $droplet;
+}
+
+sub retrieve_results {
+	my $request = HTTP::Request->new("GET" => $_[0]);
+	my $response = $ua->request($request);
+	JSON->new->utf8->decode($response->content);
+}
+
+sub display_usage {
+	print "Example Usage:\n";
+	print "  thedoctor list\n";
+	print "  thedoctor status [droplet name | droplet id]\n";
+	print "  thedoctor shutdown [droplet name | droplet id]\n";
+	print "  thedoctor startup [droplet name | droplet id]\n";
+	print "  thedoctor config [list | -l]\n";
+}
