@@ -2,37 +2,39 @@
 
 # Load in modules
 use strict;
-use LWP::UserAgent;
-use HTTP::Request;
 use Config::Simple;
-use JSON;
 use Fcntl;
+use utf8;
 use v5.10.1;
+# For debugging purposes
+#use lib './DigitalOcean/lib/';
+use WebService::DigitalOcean;
 
+# Suppress experimental warnings
+no warnings 'experimental::smartmatch';
+
+# Global Variables
 my $num_args = $#ARGV + 1;
 my @params = @ARGV;
+
+# Load in configuration from .thedoctor.ini
 my %CONFIG = &load_runtime_config();
+my $TOKEN = $CONFIG{'defaults.token'};
 
-my $client_id = $CONFIG{'defaults.client_id'};
-my $api_key = $CONFIG{'defaults.api_key'};
-my $droplet_id = '';
-my $URL = "https://api.digitalocean.com/droplets/";
-
+# Display usage if no args passed in
 if ($num_args <= 0) {
 	&display_usage();
 	exit;
 }
 
-my $ua = new LWP::UserAgent;
-$ua->agent("Perl API Client/1.0");
+# initalize DigitalOcean client
+my $do = WebService::DigitalOcean->new(token => $TOKEN);
 
 given ($params[0]) {
 	when (['list', 'l']) {
-		my $url = "$URL?client_id=$client_id&api_key=$api_key";
-		my $return_value = &retrieve_results($url); 
-		my @droplets = @{ $return_value->{'droplets'} };
-		foreach my $d ( @droplets ) {
-			print $d->{'id'}.": ".$d->{'name'}."\n";
+		my $response = $do->droplet_list();
+		for (@{ $response->{content} }) {
+			print $_->{'id'}.": ".$_->{'name'}."\n";
 		}
 	}
 	when ('status') {
@@ -42,23 +44,22 @@ given ($params[0]) {
 				exit;
 			}
 			when (/^\d+$/) {
-				my $url = "$URL$params[1]?client_id=$client_id&api_key=$api_key"; 
-				my $return_value = &retrieve_results($url); 
-				my $d = $return_value->{'droplet'};
+				my $response = $do->droplet_get($params[1]);
+				my $d = $response->{content};
 				print "$d->{'name'} is currently $d->{'status'} and can be found at $d->{'ip_address'}\n";
 			}
 			when (/^\w+$/) {
-				my $url = "$URL?client_id=$client_id&api_key=$api_key";
-				my $return_value = &retrieve_results($url); 
-				my $droplet = &resolve_droplet_name($params[1]); 
-				if ($droplet eq '')
+				my $droplet_id = &resolve_droplet_name($params[1]);
+				if ($droplet_id lt 0)
 				{
 					print "Could not locate $params[1]\n";
 					exit;
 				}
-				else 
+				else
 				{
-					print "$droplet->{'name'} is currently $droplet->{'status'} and can be found at $droplet->{'ip_address'}\n";
+					my $response = $do->droplet_get($droplet_id);
+					my $d = $response->{content};
+					print "$d->{'name'} is currently $d->{'status'} and located at $d->{'networks'}->{'v4'}[0]->{'ip_address'}\n";
 				}
 			}
 			default {
@@ -77,24 +78,16 @@ given ($params[0]) {
 				$droplet_id = $params[1];
 			}
 			when (/^\w+$/) {
-				my $droplet = &resolve_droplet_name($params[1]);
-				if ($droplet eq '') {
-					print "ERROR: Could not resolve $params[1]\n";
+				$droplet_id = &resolve_droplet_name($params[1]);
+				if ($droplet_id lt 0)
+				{
+					print "Could not locate $params[1]\n";
 					exit;
 				}
-				$droplet_id = $droplet->{'id'};
 			}
 		}
-		my $url = "$URL$droplet_id/power_off/?client_id=$client_id&api_key=$api_key";
-		my $return_value = &retrieve_results($url);
-		if (uc($return_value->{'status'}) eq "OK")
-		{
-			print "$params[1] has been shutdown\n";
-		}
-		else
-		{
-			print "ERROR: Could not successfully shutdown $params[1]\n";
-		}
+		$do->droplet_shutdown($droplet_id);
+		print "$params[1] has been shutdown\n";
 	}
 	when ('startup') {
 		my $droplet_id = '';
@@ -107,24 +100,16 @@ given ($params[0]) {
 				$droplet_id = $params[1];
 			}
 			when (/^\w+$/) {
-				my $droplet = &resolve_droplet_name($params[1]);
-				if ($droplet eq '') {
-					print "ERROR: Could not resolve $params[1]\n";
+				$droplet_id = &resolve_droplet_name($params[1]);
+				if ($droplet_id lt 0)
+				{
+					print "Could not locate $params[1]\n";
 					exit;
 				}
-				$droplet_id = $droplet->{'id'};
 			}
 		}
-		my $url = "$URL$droplet_id/power_on/?client_id=$client_id&api_key=$api_key";
-		my $return_value = &retrieve_results($url);
-		if (uc($return_value->{'status'}) eq "OK")
-		{
-			print "$params[1] has been turned on\n";
-		}
-		else
-		{
-			print "ERROR: Could not successfully startup $params[1]\n";
-		}
+		$do->droplet_power_on($droplet_id);
+		print "$params[1] has been turned on\n";
 	}
 	when ('config') {
 		given ($params[1]) {
@@ -144,22 +129,19 @@ given ($params[0]) {
 sub load_runtime_config {
 	my $config_path = "$ENV{'HOME'}/.thedoctor.ini";
 	my %values = ();
-	if (-e $config_path) 
+	if (-e $config_path)
 	{
-		Config::Simple->import_from($config_path, \%values);	
+		Config::Simple->import_from($config_path, \%values);
 	}
 	else
 	{
 		my $cfg = new Config::Simple(syntax=>'ini');
 
 		print "Some configuration is required. Please enter the following:\n";
-		print "Client ID: ";
-		chomp(my $client_id = <>);
-		print "API Key: ";
-		chomp(my $api_key = <>);
+		print "Token: ";
+		chomp(my $token = <>);
 
-		$cfg->param(-block=>"defaults", -values=>{"client_id"=>$client_id});
-		$cfg->param("defaults.api_key", $api_key);
+		$cfg->param("defaults.token", $token);
 		$cfg->write($config_path);
 		%values = $cfg->vars();
 	}
@@ -167,23 +149,14 @@ sub load_runtime_config {
 }
 
 sub resolve_droplet_name {
-	my $url = "$URL?client_id=$client_id&api_key=$api_key";
-	my $return_value = &retrieve_results($url); 
-	my @droplets = @{ $return_value->{'droplets'} };
-	my $droplet = '';
-	foreach my $d ( @droplets ) {
-		if (uc($d->{'name'}) eq uc($_[0]))
-		{
-			$droplet = $d;
+	my $droplet_id = -1;
+	my $response = $do->droplet_list();
+	for (@{ $response->{content} }) {
+		if (uc($_->{'name'}) eq uc($_[0])) {
+			$droplet_id = $_->{'id'};
 		}
 	}
-	return $droplet;
-}
-
-sub retrieve_results {
-	my $request = HTTP::Request->new("GET" => $_[0]);
-	my $response = $ua->request($request);
-	JSON->new->utf8->decode($response->content);
+	return $droplet_id;
 }
 
 sub display_usage {
